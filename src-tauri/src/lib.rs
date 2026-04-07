@@ -194,7 +194,7 @@ fn setup_tray_menu(app: &AppHandle) {
 
     let tray = app.tray_by_id("tray").expect("tray icon 'tray' not found");
 
-    let show = MenuItem::with_id(app, "show", "Show nota Ctrl+Shift+[Space]", true, None::<&str>).expect("menu item");
+    let show = MenuItem::with_id(app, "show", "Show/Hide  Ctrl+Shift+Space", true, None::<&str>).expect("menu item");
     let new_note = MenuItem::with_id(app, "new_note", "New note  Ctrl+Shift+N", true, None::<&str>).expect("menu item");
     let sep = PredefinedMenuItem::separator(app).expect("separator");
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>).expect("menu item");
