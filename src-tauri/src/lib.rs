@@ -122,8 +122,13 @@ fn rename_note(
     let dir = notes_dir(&app).join(&group);
     let old = dir.join(format!("{}.md", sanitize(&old_filename)));
     let new = dir.join(format!("{}.md", sanitize(&new_filename)));
-    if old.exists() {
-        fs::rename(old, new).map_err(|e| e.to_string())?;
+    
+    // Only rename if old file exists and is different from new
+    if old.exists() && old != new {
+        fs::rename(&old, &new).map_err(|e| e.to_string())?;
+    } else if !old.exists() {
+        // Old file doesn't exist - this might be a new note that hasn't been saved yet
+        // Just return Ok without error
     }
     Ok(())
 }
@@ -185,6 +190,37 @@ fn load_all_notes(app: AppHandle) -> Result<String, String> {
     }
 
     serde_json::to_string(&notes).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn hide_window(app: AppHandle) {
+    if let Some(win) = get_window(&app) {
+        win.hide().ok();
+    }
+}
+
+// ── config ────────────────────────────────────────────────────────────────────
+
+fn config_path(app: &AppHandle) -> PathBuf {
+    notes_dir(app).join("config.md")
+}
+
+#[tauri::command]
+fn save_config(app: AppHandle, content: String) -> Result<(), String> {
+    let dir = notes_dir(&app);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = config_path(&app);
+    fs::write(path, content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn load_config(app: AppHandle) -> Result<String, String> {
+    let path = config_path(&app);
+    if path.exists() {
+        fs::read_to_string(&path).map_err(|e| e.to_string())
+    } else {
+        Ok("{}".to_string())
+    }
 }
 
 // ── tray ──────────────────────────────────────────────────────────────────────
@@ -285,6 +321,9 @@ pub fn run() {
             delete_note,
             rename_note,
             load_all_notes,
+            hide_window,
+            save_config,
+            load_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running nota");

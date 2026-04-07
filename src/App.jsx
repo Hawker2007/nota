@@ -177,6 +177,22 @@ async function renameNoteFile(group, oldTitle, newTitle) {
   }
 }
 
+async function persistConfig(config) {
+  await initTauri();
+  if (tauriInvoke) {
+    await tauriInvoke("save_config", { content: JSON.stringify(config) });
+  }
+}
+
+async function loadConfig() {
+  await initTauri();
+  if (!tauriInvoke) return null;
+  try {
+    const raw = await tauriInvoke("load_config");
+    return JSON.parse(raw);
+  } catch { return null; }
+}
+
 // ── components ───────────────────────────────────────────────────────────────
 function GroupDot({ color, size=8 }) {
   return <span style={{ display:"inline-block", width:size, height:size, borderRadius:2, background:color, flexShrink:0 }} />;
@@ -229,40 +245,74 @@ export default function Nota() {
   const [openTabs, setOpenTabs] = useState([]);
   const [activeNote, setActiveNote] = useState(null);
   const [expanded, setExpanded] = useState({});
-  const [mode, setMode] = useState("edit");
+  const [mode, setMode] = useState("preview");
   const [search, setSearch] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [newGroupEditing, setNewGroupEditing] = useState(false);
   const [newGroupName, setNewGroupName] = useState("");
   const [saveStatus, setSaveStatus] = useState("saved");
   const [fontSize, setFontSize] = useState(13.5);
+  const [editingTitleOriginal, setEditingTitleOriginal] = useState(null); // Track original title for rename
   const textareaRef = useRef(null);
   const saveTimer = useRef(null);
   const initDone = useRef(false);
+  const escTimer = useRef(null); // Track double-escape timing
+  const escCount = useRef(0); // Track escape key presses
+
+  // Double Escape → hide window to tray
+  useEffect(() => {
+    const handleGlobalKeydown = async (e) => {
+      if (e.key === "Escape") {
+        escCount.current++;
+        if (escCount.current === 1) {
+          // First press - wait to see if there's a second
+          escTimer.current = setTimeout(() => {
+            escCount.current = 0;
+          }, 500); // 500ms window for double-press
+        } else if (escCount.current >= 2) {
+          // Double press detected - hide window
+          clearTimeout(escTimer.current);
+          escCount.current = 0;
+          await initTauri();
+          tauriInvoke?.("hide_window").catch(() => {});
+        }
+      }
+    };
+    window.addEventListener("keydown", handleGlobalKeydown);
+    return () => {
+      window.removeEventListener("keydown", handleGlobalKeydown);
+      clearTimeout(escTimer.current);
+    };
+  }, []);
 
   // Load from disk on first mount
   useEffect(() => {
     if (initDone.current) return;
     initDone.current = true;
 
-    loadGroupsFromDisk().then(diskGroups => {
-      if (diskGroups) {
-        setGroups(diskGroups);
-        const expandedMap = {};
-        diskGroups.forEach(g => { expandedMap[g.id] = true; });
-        setExpanded(expandedMap);
-        // Open the first note if any
-        const first = diskGroups[0]?.notes?.[0];
-        if (first) {
-          setOpenTabs([{ noteId: first.id, groupId: diskGroups[0].id }]);
-          setActiveNote(first.id);
+    // Load config first
+    loadConfig().then(cfg => {
+      if (cfg?.fontSize) setFontSize(cfg.fontSize);
+    }).finally(() => {
+      loadGroupsFromDisk().then(diskGroups => {
+        if (diskGroups) {
+          setGroups(diskGroups);
+          const expandedMap = {};
+          diskGroups.forEach(g => { expandedMap[g.id] = true; });
+          setExpanded(expandedMap);
+          // Open the first note if any
+          const first = diskGroups[0]?.notes?.[0];
+          if (first) {
+            setOpenTabs([{ noteId: first.id, groupId: diskGroups[0].id }]);
+            setActiveNote(first.id);
+          }
+        } else {
+          setGroups(DEFAULT_GROUPS);
+          setExpanded({ work: true, personal: true, archive: false });
+          setOpenTabs([{ noteId: "n1", groupId: "work" }]);
+          setActiveNote("n1");
         }
-      } else {
-        setGroups(DEFAULT_GROUPS);
-        setExpanded({ work: true, personal: true, archive: false });
-        setOpenTabs([{ noteId: "n1", groupId: "work" }]);
-        setActiveNote("n1");
-      }
+      });
     });
   }, []);
 
@@ -277,6 +327,14 @@ export default function Nota() {
   useEffect(() => {
     try { localStorage.setItem("nota_groups", JSON.stringify(groups)); } catch {}
   }, [groups]);
+
+  // Persist font size to config.md (debounced)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      persistConfig({ fontSize }).catch(() => {});
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [fontSize]);
 
   // Listen for tray/hotkey "new-note" event from Rust backend
   useEffect(() => {
@@ -340,11 +398,11 @@ export default function Nota() {
       notes: g.notes.map(n => {
         if (n.id !== nid) return n;
         const updated = { ...n, [field]: val, updated: "today" };
-        if (field === "content" || field === "title") {
+        // Only schedule file save for content changes, not title changes
+        // Title changes (renames) are handled separately via handleRename
+        if (field === "content") {
           const gName = g.name;
-          const title = field === "title" ? val : n.title;
-          const content = field === "content" ? val : n.content;
-          scheduleFileSave(gName, title, content);
+          scheduleFileSave(gName, n.title, val);
         }
         return updated;
       })
@@ -357,7 +415,7 @@ export default function Nota() {
     setGroups(gs => gs.map(gr => gr.id === groupId ? { ...gr, notes:[note, ...gr.notes] } : gr));
     setExpanded(ex => ({ ...ex, [groupId]:true }));
     openNote(note.id, groupId);
-    persistNote(g?.name ?? groupId, note.title, note.content).catch(console.error);
+    // Don't persist immediately - file will be created after first edit completion
     setTimeout(() => textareaRef.current?.focus(), 60);
   };
 
@@ -370,9 +428,21 @@ export default function Nota() {
   };
 
   const handleRename = async (nid, gid, oldTitle, newTitle) => {
-    const g = findGroup(gid);
-    if (g) await renameNoteFile(g.name, oldTitle, newTitle).catch(console.error);
-    updateNote(nid, "title", newTitle);
+    // Only rename file if title actually changed
+    if (oldTitle !== newTitle && newTitle.trim()) {
+      const g = findGroup(gid);
+      if (g) {
+        await renameNoteFile(g.name, oldTitle, newTitle).catch(console.error);
+      }
+    }
+    // Update the title in state without triggering a file save
+    setGroups(gs => gs.map(g => ({
+      ...g,
+      notes: g.notes.map(n => {
+        if (n.id !== nid) return n;
+        return { ...n, title: newTitle, updated: "today" };
+      })
+    })));
   };
 
   const addGroup = () => {
@@ -637,7 +707,35 @@ export default function Nota() {
                 <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", borderRight:mode==="split"?"0.5px solid #161620":"none" }}>
                   <div style={{ padding:"20px 28px 0", flexShrink:0 }}>
                     <input className="title-inp" style={{ fontSize: fontSize + 6 }} value={currentNote.title}
+                      onFocus={() => setEditingTitleOriginal(currentNote.title)}
                       onChange={e => updateNote(activeNote,"title",e.target.value)}
+                      onBlur={async (e) => {
+                        // Rename file on blur if title changed
+                        const newTitle = e.target.value;
+                        const oldTitle = editingTitleOriginal ?? currentNote.title;
+                        if (newTitle !== oldTitle && newTitle.trim() && currentGroup) {
+                          await renameNoteFile(currentGroup.name, oldTitle, newTitle).catch(console.error);
+                        }
+                        setEditingTitleOriginal(null);
+                      }}
+                      onKeyDown={async (e) => {
+                        if (e.key === "Enter") {
+                          // Rename file on Enter if title changed
+                          const newTitle = e.target.value;
+                          const oldTitle = editingTitleOriginal ?? currentNote.title;
+                          if (newTitle !== oldTitle && newTitle.trim() && currentGroup) {
+                            await renameNoteFile(currentGroup.name, oldTitle, newTitle).catch(console.error);
+                          }
+                          e.currentTarget.blur();
+                        }
+                        if (e.key === "Escape") {
+                          // Revert to original title
+                          if (editingTitleOriginal !== null) {
+                            updateNote(activeNote, "title", editingTitleOriginal);
+                          }
+                          e.currentTarget.blur();
+                        }
+                      }}
                       placeholder="note title…" />
                     <div style={{ height:0.5, background:"#161620", margin:"12px 0" }} />
                   </div>
@@ -652,7 +750,8 @@ export default function Nota() {
                 </div>
               )}
               {(mode==="preview"||mode==="split") && (
-                <div style={{ flex:1, overflow:"auto", padding:"20px 28px 40px" }}>
+                <div style={{ flex:1, overflow:"auto", padding:"20px 28px 40px" }}
+                  onDoubleClick={() => { if (mode === "preview") setMode("edit"); }}>
                   <div className="nota-preview" style={{ fontSize }} onClick={handlePreviewClick}
                     dangerouslySetInnerHTML={{ __html: renderMarkdown(currentNote.content) }} />
                 </div>
