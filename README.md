@@ -3,6 +3,9 @@
 A lightweight personal note-taking app for Windows 11.  
 Dark terminal aesthetic · Markdown + code blocks · Tabs & groups · Tray icon · Files saved as `.md` in `~/Documents/Nota/`
 
+
+<img width="2366" height="1534" alt="image" src="https://github.com/user-attachments/assets/1b4a3c35-071f-47db-aecb-480a8b6ad400" />
+
 ---
 
 ## Prerequisites
