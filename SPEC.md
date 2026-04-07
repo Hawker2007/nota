@@ -5,7 +5,7 @@
 **nota** is a lightweight personal note-taking desktop app for Windows 11, built with Tauri v2 (Rust + React). It features a dark terminal aesthetic, markdown editing with live preview, and saves notes as plain `.md` files on disk.
 
 - **Version:** 0.1.0
-- **Identifier:** `dev.nota.appl`
+- **Identifier:** `dev.nota.nota`
 - **License:** MIT
 
 ---
@@ -17,7 +17,7 @@
 | Layer | Technology |
 |---|---|
 | Frontend | React 18 (JSX) |
-| Build tool | Vite 5 |
+| Build tool | Vite 6 |
 | Backend | Tauri 2.x (Rust) |
 | Rendering | WebView2 (Windows 11) |
 | Styling | Inline CSS + injected stylesheet |
@@ -31,7 +31,7 @@ nota-tauri/
 ├── vite.config.js          # Vite configuration
 ├── src/
 │   ├── main.jsx            # React entry point
-│   └── App.jsx             # Single-file React app (~670 lines)
+│   └── App.jsx             # Single-file React app (~832 lines)
 └── src-tauri/
     ├── Cargo.toml           # Rust dependencies
     ├── tauri.conf.json      # Tauri configuration
@@ -39,8 +39,8 @@ nota-tauri/
     ├── capabilities/
     │   └── default.json     # v2 ACL capability definitions
     └── src/
-        ├── main.rs          # Entry point (~15 lines) — calls app_lib::run()
-        └── lib.rs           # Tauri library (~290 lines) — backend logic
+        ├── main.rs          # Entry point (~13 lines) — calls app_lib::run()
+        └── lib.rs           # Tauri library (~320 lines) — backend logic
 ```
 
 ---
@@ -61,13 +61,15 @@ nota-tauri/
 | **Context menu** | Right-click note → Rename, Copy content, Delete |
 | **Auto-save** | Notes saved to disk 600ms after typing stops |
 | **Word/char count** | Status bar shows word count, char count, save status |
-| **Single-instance** | Only one app instance allowed; second launch activates existing window |
+| **Single-instance** | Only one app instance allowed; second launch exits silently |
+| **Double Escape** | Pressing Escape twice within 500ms hides window to tray |
+| **Config persistence** | Font size and other settings saved to `~/Documents/Nota/config.md` |
 
 ### Markdown Support
 
 | Syntax | Rendering |
 |---|---|
-| `#`, `##`, `###` | Headings (1.5em, 0.82em, 1.05em relative to base) |
+| `#`, `##`, `###` | Headings (1.5em, 0.82em uppercase, 1.05em relative to base) |
 | `**bold**`, `*italic*`, `~~strikethrough~~` | Inline formatting |
 | `` `inline code` `` | Styled code block |
 | `\`\`\`lang … \`\`\`` | Code block with language label |
@@ -82,10 +84,11 @@ nota-tauri/
 
 | Feature | Details |
 |---|---|
-| **System tray** | Tray icon with menu: Show / New note / Quit |
+| **System tray** | Tray icon with menu: Show/Hide, New note, Quit |
 | **Global shortcuts** | `Ctrl+Shift+Space` → toggle window, `Ctrl+Shift+N` → new note |
 | **Close to tray** | Closing the window hides to tray instead of quitting |
 | **File storage** | Plain `.md` files in `~/Documents/Nota/<Group>/<Title>.md` |
+| **Config file** | Settings stored in `~/Documents/Nota/config.md` as JSON |
 
 ### Editor Shortcuts
 
@@ -106,7 +109,7 @@ nota-tauri/
 ### State Management
 
 - **Single component** — all state lives in `Nota` component via `useState`
-- **Persistence** — groups stored in `localStorage` key `nota_groups`
+- **Persistence** — groups stored in `localStorage` key `nota_groups`; config stored via Tauri backend to `config.md`
 - **No external state library** — no Redux, Zustand, etc.
 
 ### Key State Variables
@@ -116,11 +119,16 @@ nota-tauri/
 | `groups` | `Array<Group>` | All groups with their notes |
 | `openTabs` | `Array<{noteId, groupId}>` | Currently open tab references |
 | `activeNote` | `string` | ID of the currently active note |
-| `mode` | `"edit" \| "split" \| "preview"` | Editor view mode |
+| `mode` | `"edit" \| "split" \| "preview"` | Editor view mode (default: `"preview"`) |
 | `search` | `string` | Search query string |
 | `sidebarOpen` | `boolean` | Sidebar visibility |
 | `saveStatus` | `"saved" \| "saving…"` | File save indicator |
 | `fontSize` | `number` | Editor/preview font size (10–24, default 13.5) |
+| `editingTitleOriginal` | `string \| null` | Tracks original title during rename for undo |
+| `notesDir` | `string` | Path label shown in titlebar |
+| `expanded` | `Object` | Group expansion state |
+| `newGroupEditing` | `boolean` | New group input mode |
+| `newGroupName` | `string` | Pending new group name |
 
 ### Components (all in one file)
 
@@ -148,13 +156,18 @@ Custom lightweight `renderMarkdown(text)` function supporting:
 - Blockquotes, horizontal rules
 - Blank line between tables → separate tables
 
+### Disk Loading
+
+- `loadGroupsFromDisk()` — invokes `load_all_notes` Tauri command, groups notes by directory, assigns colors from `GROUP_COLORS` palette
+- Called on first mount; falls back to `DEFAULT_GROUPS` if no disk data found
+
 ---
 
 ## Backend (lib.rs + main.rs)
 
 ### Entry Point
 
-- **`main.rs`** — checks single-instance mutex, calls `app_lib::run()`
+- **`main.rs`** — checks single-instance mutex, calls `app_lib::run()`; uses `windows_subsystem = "windows"` in release
 - **`lib.rs`** — all backend logic; exports `run()` via `[lib]` with `crate-type = ["staticlib", "cdylib", "rlib"]`
 
 ### Tauri Commands
@@ -165,15 +178,18 @@ Custom lightweight `renderMarkdown(text)` function supporting:
 | `save_note` | `group`, `filename`, `content` | `Result<(), String>` | Writes `.md` file |
 | `delete_note` | `group`, `filename` | `Result<(), String>` | Removes `.md` file |
 | `rename_note` | `group`, `old_filename`, `new_filename` | `Result<(), String>` | Renames file on disk |
-| `load_all_notes` | `app: AppHandle` | `String` (JSON) | Scans directory tree, returns all notes |
+| `load_all_notes` | `app: AppHandle` | `Result<String, String>` (JSON) | Scans directory tree, returns all notes |
+| `hide_window` | `app: AppHandle` | `()` | Hides the main window |
+| `save_config` | `content: String` | `Result<(), String>` | Saves config JSON to `config.md` |
+| `load_config` | `app: AppHandle` | `Result<String, String>` | Loads config from `config.md` |
 
 ### System Tray
 
 - **Config-based** — defined in `tauri.conf.json` with `id: "tray"`
 - **Menu set programmatically** — `MenuItem` + `Menu` via `app.tray_by_id("tray")`
-- **Menu items:** Show, New note, Quit
-- **Left-click:** Toggle window visibility
-- **Stored in app state** via `app.manage()` to prevent GC
+- **Menu items:** Show/Hide (with shortcut hint), New note, separator, Quit
+- **Left-click:** Toggle window visibility (show_menu_on_left_click: false)
+- **Right-click:** Shows context menu
 
 ### Global Shortcuts
 
@@ -184,12 +200,14 @@ Custom lightweight `renderMarkdown(text)` function supporting:
 ### Single-Instance
 
 - Named Windows mutex: `Local\nota-single-instance-mutex`
-- If mutex already held, finds the existing window via `FindWindowW("TauriWindow")`, calls `SetForegroundWindow` + `ShowWindow(SW_RESTORE)`, then exits
+- If mutex already held, `main.rs` returns early without launching
 
 ### Window Behavior
 
 - Close event → `prevent_close()` + `hide()` (stays in tray)
 - `show_window()` → `show()` + `set_focus()` + `unminimize()`
+- `toggle_window()` → hide if visible and not minimized, else show
+- Initial visibility: `visible: false` in config (shown via shortcut/tray)
 
 ### Path Resolution
 
@@ -203,7 +221,7 @@ Custom lightweight `renderMarkdown(text)` function supporting:
 
 ```typescript
 interface Group {
-  id: string;       // uid (random 7 chars)
+  id: string;       // uid (random 7 chars or slugified name)
   name: string;
   color: string;    // hex color
   notes: Note[];
@@ -214,7 +232,7 @@ interface Group {
 
 ```typescript
 interface Note {
-  id: string;       // uid (random 7 chars)
+  id: string;       // uid (random 7 chars or disk-prefixed)
   title: string;
   updated: string;  // "today", "yesterday", "Mar 28", etc.
   content: string;  // raw markdown
@@ -227,6 +245,8 @@ Each note maps to a file: `~/Documents/Nota/<GroupName>/<Title>.md`
 
 Filename sanitization: replaces `/ \ : * ? " < > |` with `-`, trims whitespace.
 
+Config stored at: `~/Documents/Nota/config.md` (JSON format)
+
 ---
 
 ## Tauri v2 Capabilities
@@ -236,7 +256,7 @@ Permissions defined in `src-tauri/capabilities/default.json`:
 | Capability | Permissions |
 |---|---|
 | `core:default` | Core app access |
-| `fs:allow-*` | Read/write/rename/remove files |
+| `fs:allow-*` | read-file, write-file, read-dir, copy-file, mkdir, remove, rename, exists |
 | `fs:scope` | Scoped to `$DOCUMENT/Nota/**` and `$DOCUMENT/Nota` |
 | `shell:allow-open` | Open external links |
 | `notification:default` | System notifications |
@@ -254,6 +274,8 @@ Permissions defined in `src-tauri/capabilities/default.json`:
 | Centered | Yes |
 | Resizable | Yes |
 | Decorations | Yes (standard title bar) |
+| Transparent | No |
+| Initial visibility | false (shown via shortcut/tray) |
 | HTTPS scheme | Yes (`useHttpsScheme: true` to prevent LocalStorage reset in v2) |
 
 ---
@@ -267,6 +289,10 @@ Three groups ship with sample notes:
 | Work | `#534AB7` | API Design Notes, Sprint Retrospective |
 | Personal | `#1D9E75` | Book List 2025 |
 | Archive | `#888780` | Old Project Ideas |
+
+### Group Color Palette
+
+`#534AB7`, `#1D9E75`, `#D85A30`, `#D4537E`, `#BA7517`, `#378ADD`, `#639922`
 
 ---
 
@@ -305,14 +331,15 @@ npm run tauri build
 |---|---|---|
 | `react` | 18.2.0 | UI framework |
 | `react-dom` | 18.2.0 | DOM rendering |
-| `@tauri-apps/api` | 2.x | Tauri JS client |
-| `@tauri-apps/plugin-fs` | 2.x | File system access |
-| `@tauri-apps/plugin-notification` | 2.x | System notifications |
-| `@tauri-apps/plugin-shell` | 2.x | Shell/open API |
-| `@tauri-apps/plugin-global-shortcut` | 2.x | Global hotkeys |
-| `vite` | 5.0.0 | Build tool |
-| `@vitejs/plugin-react` | 4.2.0 | React plugin |
-| `@tauri-apps/cli` | 2.x | Tauri CLI |
+| `@tauri-apps/api` | ^2.0.0 | Tauri JS client |
+| `@tauri-apps/plugin-fs` | ^2.5.0 | File system access |
+| `@tauri-apps/plugin-notification` | ^2.3.3 | System notifications |
+| `@tauri-apps/plugin-shell` | ^2.3.5 | Shell/open API |
+| `@tauri-apps/plugin-global-shortcut` | ^2.3.1 | Global hotkeys |
+| `esbuild` | ^0.28.0 | JS bundler |
+| `vite` | ^6.3.5 | Build tool |
+| `@vitejs/plugin-react` | ^4.2.0 | React plugin |
+| `@tauri-apps/cli` | ^2.10.1 | Tauri CLI |
 
 ### Backend
 
@@ -321,10 +348,10 @@ npm run tauri build
 | `tauri` | 2.x | Desktop app framework |
 | `serde` | 1.x | Serialization |
 | `serde_json` | 1.x | JSON handling |
-| `tauri-plugin-fs` | 2.x | File system plugin |
-| `tauri-plugin-notification` | 2.x | Notification plugin |
-| `tauri-plugin-shell` | 2.x | Shell/open plugin |
-| `tauri-plugin-global-shortcut` | 2.x | Global shortcut plugin |
+| `tauri-plugin-fs` | 2 | File system plugin |
+| `tauri-plugin-notification` | 2 | Notification plugin |
+| `tauri-plugin-shell` | 2 | Shell/open plugin |
+| `tauri-plugin-global-shortcut` | 2 | Global shortcut plugin |
 | `keyboard-types` | 0.7 | `Code` enum for shortcuts |
 | `windows-sys` | 0.52 | Native Windows APIs (single-instance mutex) |
 | `pathdiff` | 0.2 | Path utilities |
@@ -349,18 +376,19 @@ npm run tauri build
 | Path resolution | `tauri::api::path::document_dir()` | `app.path().document_dir()` |
 | Shortcut keys | String-based (`"KeyN"`) | `keyboard_types::Code::KeyN` |
 | HTTP scheme | `https://` default | `http://` (opt-in `useHttpsScheme: true`) |
-| Single-instance | N/A | Named mutex + `FindWindowW("TauriWindow")` |
+| Single-instance | N/A | Named mutex + early exit in `main.rs` |
 
 ---
 
 ## Known Limitations
 
-1. **No note loading from disk on startup** — `load_all_notes` command exists but is never called from the frontend; starter data comes from `localStorage`.
-2. **No sync** — notes are local-only; no cloud or multi-device support.
-3. **Single-file frontend** — all React code in one `App.jsx`, not modularized.
-4. **Windows-only** — uses Windows-specific tray behavior and WebView2.
-5. **No rich text editing** — plain textarea with markdown, no WYSIWYG.
-6. **No tags or cross-group linking** — notes are strictly hierarchical (group → notes).
-7. **No export/import** — no backup or migration tools built in.
-8. **Font size not persisted** — resets to 13.5 on app restart.
-9. **Table alignment** — `table-layout: fixed` distributes columns evenly; no column-width control.
+1. **No sync** — notes are local-only; no cloud or multi-device support.
+2. **Single-file frontend** — all React code in one `App.jsx`, not modularized.
+3. **Windows-only** — uses Windows-specific tray behavior and WebView2.
+4. **No rich text editing** — plain textarea with markdown, no WYSIWYG.
+5. **No tags or cross-group linking** — notes are strictly hierarchical (group → notes).
+6. **No export/import** — no backup or migration tools built in.
+7. **Table alignment** — `table-layout: fixed` distributes columns evenly; no column-width control.
+8. **LocalStorage fallback** — when running without Tauri, groups persist to `localStorage` but file I/O is unavailable.
+9. **No search highlighting** — search filters notes but doesn't highlight matches in content.
+10. **Config is minimal** — only font size is currently persisted to config.
